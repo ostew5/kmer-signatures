@@ -10,10 +10,10 @@
  *          */
 
 
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <stddef.h>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <cstddef>
 
 typedef  unsigned long long  ub8;
 #define UB8MAXVAL 0xffffffffffffffffLL
@@ -42,8 +42,6 @@ typedef                 int  word;  /* fastest type available */
 #define bit(target,mask)  ((target) &   (mask))
 #define align(a) (((ub4)a+(sizeof(void *)-1))&(~(sizeof(void *)-1)))
 #define abs(a)   (((a)>0) ? (a) : -(a))
-#define TRUE  1
-#define FALSE 0
 #define SUCCESS 0  /* 1 on VAX */
 
 
@@ -65,12 +63,12 @@ typedef  struct randctx  randctx;
 
 /*
  * ------------------------------------------------------------------------------
- *   If (flag==TRUE), then use the contents of randrsl[0..RANDSIZ-1] as the seed.
+ *   If (flag==true), then use the contents of randrsl[0..RANDSIZ-1] as the seed.
  *   ------------------------------------------------------------------------------
  *   */
-void randinit(/*_ randctx *r, word flag _*/);
+void randinit(randctx *r, word flag);
 
-void isaac(/*_ randctx *r _*/);
+void isaac(randctx *r);
 
 
 /*
@@ -86,7 +84,7 @@ void isaac(/*_ randctx *r _*/);
 
 #define ind(mm,x)  (*(ub4 *)((ub1 *)(mm) + ((x) & ((RANDSIZ-1)<<2))))
 #define rngstep(mix,a,b,mm,m,m2,r,x) \
-{ \
+{\
   x = *m;  \
   a = (a^(mix)) + *(m2++); \
   *(m++) = y = ind(mm,x) + a + b; \
@@ -95,7 +93,7 @@ void isaac(/*_ randctx *r _*/);
 
 void     isaac(randctx *ctx)
 {
-   register ub4 a,b,x,y,*m,*mm,*m2,*r,*mend;
+   ub4 a,b,x,y,*m,*mm,*m2,*r,*mend;
    mm=ctx->randmem; r=ctx->randrsl;
    a = ctx->randa; b = ctx->randb + (++ctx->randc);
    for (m = mm, mend = m2 = m+(RANDSIZ/2); m<mend; )
@@ -117,7 +115,7 @@ void     isaac(randctx *ctx)
 
 
 #define mix(a,b,c,d,e,f,g,h) \
-{ \
+{\
    a^=b<<11; d+=a; b+=c; \
    b^=c>>2;  e+=b; c+=d; \
    c^=d<<8;  f+=c; d+=e; \
@@ -128,7 +126,7 @@ void     isaac(randctx *ctx)
    h^=a>>9;  c+=h; a+=b; \
 }
 
-/* if (flag==TRUE), then use the contents of randrsl[] to initialize mm[]. */
+/* if (flag==true), then use the contents of randrsl[] to initialize mm[]. */
 void randinit(randctx *ctx, word flag)
 {
    word i;
@@ -183,14 +181,14 @@ void randinit(randctx *ctx, word flag)
 
 randctx R;
 
-void seed_random(char* term, int length)
+extern "C" void seed_random(char* term, int length)
 {
     memset(R.randrsl, 0, sizeof(R.randrsl));
-    strncpy_s((char *)(R.randrsl), sizeof(R.randrsl), term, length);
-    randinit(&R, TRUE);
+    memcpy((char *)(R.randrsl), term, length);
+    randinit(&R, true);
 }
 
-short random_num(short max)
+extern "C" short random_num(short max)
 {
     return rand(&R) % max;
 }

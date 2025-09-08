@@ -1,10 +1,9 @@
 FROM gcc:latest
 
 WORKDIR /usr/src/kmer-signatures
-COPY . .
+COPY src/ ./src/
 
-RUN apt-get update && apt-get install -y libsafec-dev && rm -rf /var/lib/apt/lists/*
+RUN g++ -O2 -std=gnu++17 -o kmer-signatures src/*.cpp
 
-RUN g++ -O2 -std=gnu++17 -D__STDC_WANT_LIB_EXT1__=1 -o kmer-signatures src/*.cpp -lsafec
-
-CMD ["./kmer-signatures"]
+ENTRYPOINT ["./kmer-signatures"]
+CMD ["./data/qut3.fasta"]

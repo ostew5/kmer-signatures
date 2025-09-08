@@ -1,7 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include "uthash.h"
 #include <chrono>
 
@@ -15,10 +15,10 @@ int PARTITION_SIZE;
 int inverse[256];
 const char* alphabet = "CSTPAGNDEQHRKMILVFYW";
 
-
+extern "C" {
 void seed_random(char* term, int length);
 short random_num(short max);
-void Init();
+}
 
 int doc_sig[SIGNATURE_LEN];
 
@@ -72,7 +72,8 @@ short *find_sig(char* term)
     if (entry == NULL)
     {
         entry = (hash_term*)malloc(sizeof(hash_term));
-        strncpy_s(entry->term, sizeof(entry->term), term, WORDLEN);
+        memcpy(entry->term, term, WORDLEN);
+        entry->term[WORDLEN] = '\0';
         memset(entry->sig, 0, sizeof(entry->sig));
         compute_new_term_sig(term, entry->sig);
         HASH_ADD(hh, vocab, term, WORDLEN, entry);
@@ -135,38 +136,54 @@ int power(int n, int e)
 
 int main(int argc, char* argv[])
 {
-    //const char* filename = "qut2.fasta";
-    const char* filename = "qut3.fasta";
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
+        return 1;
+    }
+    const char* filename = argv[1];
     
     WORDLEN = 3;
     PARTITION_SIZE = 16;
     int WORDS = power(20, WORDLEN);
 
-    for (int i=0; i<strlen(alphabet); i++)
+    for (size_t i=0; i<strlen(alphabet); i++)
         inverse[alphabet[i]] = i;
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    FILE* file;
-    errno_t OK = fopen_s(&file, filename, "r");
+    FILE* file = fopen(filename, "r");
 
-    if (OK != 0)
+    if (file == NULL)
     {
         fprintf(stderr, "Error: failed to open file %s\n", filename);
         return 1;
     }
 
     char outfile[256];
-    sprintf_s(outfile, 256, "%s.part%d_sigs%02d_%d", filename, PARTITION_SIZE, WORDLEN, SIGNATURE_LEN);
-    fopen_s(&sig_file, outfile, "w");
+    snprintf(outfile, 256, "%s.part%d_sigs%02d_%d", filename, PARTITION_SIZE, WORDLEN, SIGNATURE_LEN);
+    sig_file = fopen(outfile, "wb");
+    if (sig_file == NULL)
+    {
+        fprintf(stderr, "Error: failed to open file %s\n", outfile);
+        fclose(file);
+        return 1;
+    }
 
     char buffer[10000];
-    while (!feof(file))
+    while (fgets(buffer, 10000, file) != NULL)
     {
-        fgets(buffer, 10000, file); // skip meta data line
-        fgets(buffer, 10000, file);
-        int n = (int)strlen(buffer) - 1;
-        buffer[n] = 0;
+        if (fgets(buffer, 10000, file) == NULL) {
+            break; // Expected sequence line not found
+        }
+        size_t n = strlen(buffer);
+        if (n > 0 && buffer[n-1] == '\n') {
+            buffer[n-1] = 0;
+            n--;
+        }
+        if (n > 0 && buffer[n-1] == '\r') {
+            buffer[n-1] = 0;
+            n--;
+        }
         partition(buffer, n);
     }
     fclose(file);
