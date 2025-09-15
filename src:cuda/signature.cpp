@@ -36,62 +36,6 @@ typedef struct
 
 hash_term *vocab = NULL;
 
-
-short* compute_new_term_sig(char* term, short *term_sig)
-{
-    seed_random(term, WORDLEN);
-
-    int non_zero = SIGNATURE_LEN * DENSITY/100;
-
-    int positive = 0;
-    while (positive < non_zero/2)
-    {
-        short pos = random_num(SIGNATURE_LEN);
-        if (term_sig[pos] == 0) 
-	{
-            term_sig[pos] = 1;
-            positive++;
-        }
-    }
-
-    int negative = 0;
-    while (negative < non_zero/2)
-    {
-        short pos = random_num(SIGNATURE_LEN);
-        if (term_sig[pos] == 0) 
-	{
-            term_sig[pos] = -1;
-            negative++;
-        }
-    }
-    return term_sig;
-}
-
-short *find_sig(char* term)
-{
-    hash_term *entry;
-    HASH_FIND(hh, vocab, term, WORDLEN, entry);
-    if (entry == NULL)
-    {
-        entry = (hash_term*)malloc(sizeof(hash_term));
-        strncpy(entry->term, term, sizeof(entry->term) - 1);
-        entry->term[sizeof(entry->term) - 1] = '\0';
-        memset(entry->sig, 0, sizeof(entry->sig));
-        compute_new_term_sig(term, entry->sig);
-        HASH_ADD(hh, vocab, term, WORDLEN, entry);
-    }
-
-    return entry->sig;
-}
-
-
-void signature_add(char* term)
-{
-	short* term_sig = find_sig(term);
-	for (int i=0; i<SIGNATURE_LEN; i++)
-		doc_sig[i] += term_sig[i];
-}
-
 int doc = 0;
 
 void compute_signature(char* sequence, int length)
@@ -99,7 +43,49 @@ void compute_signature(char* sequence, int length)
     memset(doc_sig, 0, sizeof(doc_sig));
 
     for (int i=0; i<length-WORDLEN+1; i++)
-        signature_add(sequence+i);
+    {
+        hash_term *entry;
+        HASH_FIND(hh, vocab, (sequence+i), WORDLEN, entry);
+        if (entry == NULL)
+        {
+            entry = (hash_term*)malloc(sizeof(hash_term));
+            strncpy(entry->term, (sequence+i), sizeof(entry->term) - 1);
+            entry->term[sizeof(entry->term) - 1] = '\0';
+            memset(entry->sig, 0, sizeof(entry->sig));
+
+            seed_random((sequence+i), WORDLEN);
+
+            int non_zero = SIGNATURE_LEN * DENSITY/100;
+
+            int positive = 0;
+            while (positive < non_zero/2)
+            {
+                short pos = random_num(SIGNATURE_LEN);
+                if (entry->sig[pos] == 0) 
+            {
+                    entry->sig[pos] = 1;
+                    positive++;
+                }
+            }
+
+            int negative = 0;
+            while (negative < non_zero/2)
+            {
+                short pos = random_num(SIGNATURE_LEN);
+                if (entry->sig[pos] == 0) 
+            {
+                    entry->sig[pos] = -1;
+                    negative++;
+                }
+            }
+
+            HASH_ADD(hh, vocab, term, WORDLEN, entry);
+        }
+
+        short* term_sig = entry->sig;
+        for (int j=0; j<SIGNATURE_LEN; j++)
+            doc_sig[j] += term_sig[j];
+    }
 
     // save document number to sig file
     fwrite(&doc, sizeof(int), 1, sig_file);
