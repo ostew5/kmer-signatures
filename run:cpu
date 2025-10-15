@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
 docker build -t signature:cpu -f src/Dockerfile src/.
 
-docker run --rm -v $(pwd)/data:/app/data signature:cpu
+if [ $? -eq 0 ]; then
+    echo "Docker build succeeded"
+    docker run --rm -v $(pwd)/data:/app/data signature:cpu
+else
+    echo "Docker build failed"
+    exit 1
+fi

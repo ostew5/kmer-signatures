@@ -3,7 +3,24 @@
 #include <string.h>
 #include <math.h>
 #include "uthash.h"
+extern "C" {
+    void seed_random(char* term, int length);
+    short random_num(short max);
+}
+
+inline uint32_t pcg_random(uint32_t input) {
+    uint32_t pcg_state = input * 747796405u + 2891336453u;
+    uint32_t pcg_word = ((pcg_state >> ((pcg_state >> 28u) + 4u)) ^ pcg_state) * 277803737u;
+    return (pcg_word >> 22u) ^ pcg_word;
+}
+
 #include <chrono>
+
+//#define DEBUG // Uncomment to enable debug output
+
+#ifdef DEBUG
+int debug_counter = 0;
+#endif
 
 typedef unsigned char byte;
 
@@ -15,10 +32,6 @@ int PARTITION_SIZE;
 int inverse[256];
 const char* alphabet = "CSTPAGNDEQHRKMILVFYW";
 
-extern "C" {
-    void seed_random(char* term, int length);
-    short random_num(short max);
-}
 
 void Init();
 
@@ -39,14 +52,19 @@ hash_term *vocab = NULL;
 
 short* compute_new_term_sig(char* term, short *term_sig)
 {
-    seed_random(term, WORDLEN);
+    uint32_t seed = static_cast<uint32_t>(term[0]);
+    for (int i = 1; i < WORDLEN; i++) {
+        seed = (seed << 8) | static_cast<uint32_t>(term[i]);
+    }
 
     int non_zero = SIGNATURE_LEN * DENSITY/100;
 
     int positive = 0;
     while (positive < non_zero/2)
     {
-        short pos = random_num(SIGNATURE_LEN);
+        uint32_t hash = pcg_random(seed);
+        seed ^= hash; // Update seed for next iteration
+        short pos = hash % SIGNATURE_LEN;
         if (term_sig[pos] == 0) 
 	{
             term_sig[pos] = 1;
@@ -57,7 +75,9 @@ short* compute_new_term_sig(char* term, short *term_sig)
     int negative = 0;
     while (negative < non_zero/2)
     {
-        short pos = random_num(SIGNATURE_LEN);
+        uint32_t hash = pcg_random(seed);
+        seed ^= hash; // Update seed for next iteration
+        short pos = hash % SIGNATURE_LEN;
         if (term_sig[pos] == 0) 
 	{
             term_sig[pos] = -1;
@@ -88,30 +108,56 @@ short *find_sig(char* term)
 void signature_add(char* term)
 {
 	short* term_sig = find_sig(term);
-	for (int i=0; i<SIGNATURE_LEN; i++)
+#ifdef DEBUG
+    int pos = 0, neg = 0;
+#endif
+	for (int i=0; i<SIGNATURE_LEN; i++){
+#ifdef DEBUG
+        if (term_sig[i] > 0) {
+            printf("+ ");
+            pos++;
+        } else if (term_sig[i] < 0) {
+            printf("- ");
+            neg++;
+        } else {
+            printf("0 ");
+        }
+#endif
 		doc_sig[i] += term_sig[i];
+    }
+#ifdef DEBUG
+    printf("pos: %d, neg: %d, sig: %d\n", pos, neg, debug_counter++);
+    pos = 0, neg = 0;
+#endif
 }
 
 int doc = 0;
 
 void compute_signature(char* sequence, int length)
 {
-    memset(doc_sig, 0, sizeof(doc_sig));
+    memset(doc_sig, 0, sizeof(doc_sig)); // reset doc_sig to all zeros
 
     for (int i=0; i<length-WORDLEN+1; i++)
         signature_add(sequence+i);
 
+    if (length < WORDLEN)
+        printf("Warning: sequence length %d is shorter than WORDLEN %d\n", length, WORDLEN);
+
     // save document number to sig file
-    fwrite(&doc, sizeof(int), 1, sig_file);
+    // document is the same as the .fasta line, doc is set at partition()
+    //fwrite(&doc, sizeof(int), 1, sig_file);
+    
     
     // flatten and output to sig file
     for (int i = 0; i < SIGNATURE_LEN; i += 8) 
     {
         byte c = 0;
         for (int j = 0; j < 8; j++) 
-            c |= (doc_sig[i+j]>0) << (7-j);
-        fwrite(&c, sizeof(byte), 1, sig_file);
+            c |= (doc_sig[i + j] > 0) << (7-j);
+        //fwrite(&c, sizeof(byte), 1, sig_file);
+        fprintf(sig_file, "%02x", c);
     }
+    fprintf(sig_file, "\n");
 }
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
@@ -119,12 +165,17 @@ void compute_signature(char* sequence, int length)
 void partition(char* sequence, int length)
 {
     int i=0;
+    int part = 0;
     do
     {
         compute_signature(sequence+i, min(PARTITION_SIZE, length-i));
+#ifdef DEBUG
+        printf("End of partition %d\n\n", part++);
+#endif
         i += PARTITION_SIZE/2;
     }
     while (i+PARTITION_SIZE/2 < length);
+    fprintf(sig_file, "\n");
     doc++;
 }
 
@@ -138,7 +189,6 @@ int power(int n, int e)
 
 int main(int argc, char* argv[])
 {
-    system("ls -la");
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return 1;
@@ -173,7 +223,13 @@ int main(int argc, char* argv[])
         fgets(buffer, 10000, file);
         int n = (int)strlen(buffer) - 1;
         buffer[n] = 0;
+#ifdef DEBUG
+        printf("Processing line of length %d\n", n);
+#endif
         partition(buffer, n);
+#ifdef DEBUG
+        printf("\n");
+#endif
     }
     fclose(file);
 
