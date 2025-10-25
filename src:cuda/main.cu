@@ -2,18 +2,21 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <cctype>
 
 #include <cuda_runtime.h>
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 
 #define WORDLEN 3
 #define PARTITION_SIZE 16
 #define SIGNATURE_LEN 64
 #define DENSITY 21
+#define BATCH_SIZE 2048
 
-//#define DEBUG // Uncomment to enable debug output
+#define DEBUG // Uncomment to enable debug output 
 
 #ifdef DEBUG
 int debug_counter = 0;
@@ -22,237 +25,405 @@ int debug_counter = 0;
 #define SIGNING_KERNEL_THREADS(line_length) (line_length - WORDLEN + 1) + ((int)(PARTITION_SIZE / 2) - WORDLEN + 1) * (int)std::ceil(2.0f * (std::max(line_length, PARTITION_SIZE) - PARTITION_SIZE) / PARTITION_SIZE)
 #define REDUCING_KERNEL_THREADS(line_length) (int)std::ceil((double)(SIGNING_KERNEL_THREADS(line_length)) / (double)(PARTITION_SIZE - WORDLEN + 1)) * 8
 
-__device__ __forceinline__ uint32_t pcg_random(uint32_t input) {
-    uint32_t pcg_state = input * 747796405u + 2891336453u;
-    uint32_t pcg_word = ((pcg_state >> ((pcg_state >> 28u) + 4u)) ^ pcg_state) * 277803737u;
-    return (pcg_word >> 22u) ^ pcg_word;
+__device__ __forceinline__ uint32_t pcg_random(uint32_t input)
+{
+        uint32_t pcg_state = input * 747796405u + 2891336453u;
+        uint32_t pcg_word = ((pcg_state >> ((pcg_state >> 28u) + 4u)) ^ pcg_state) * 277803737u;
+        return (pcg_word >> 22u) ^ pcg_word;
 }
 
-__global__ void signingKernel(const char* input, signed char* signatures, int numThreads) {
-    // Each thread processes one word
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numThreads) {
-        return;
-    }
-
-    // Calculate the starting position of the word in the input and output signature
-    //int input_offset = (int)(idx / (PARTITION_SIZE - (WORDLEN - 1))) * WORDLEN + idx;
-    int input_offset = idx + (-PARTITION_SIZE + (WORDLEN - 1) + (int)(PARTITION_SIZE / 2)) * (int)(idx / (PARTITION_SIZE - (WORDLEN - 1)));
-    int output_offset = idx * SIGNATURE_LEN;
-
-    // Initialise seed from the word
-    uint32_t seed = static_cast<uint32_t>(input[input_offset]);
-    for (int i = 1; i < WORDLEN; i++) {
-        seed = (seed << 8) | static_cast<uint32_t>(input[input_offset + i]);
-    }
-    
-    int non_zero = SIGNATURE_LEN * DENSITY / 100;
-    int positive = 0;
-    while (positive < non_zero/2)
-    {
-        uint32_t hash = pcg_random(seed);
-        seed ^= hash; // Update seed for next iteration
-        short pos = hash % SIGNATURE_LEN;
-        if (signatures[output_offset + pos] == 0) 
-	    {
-            signatures[output_offset + pos] = 1;
-            positive++;
+__global__ void signingKernel(const char *input, signed char *signatures, int numThreads)
+{
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= numThreads)
+        {
+                return;
         }
-    }
 
-    int negative = 0;
-    while (negative < non_zero/2)
-    {
-        uint32_t hash = pcg_random(seed);
-        seed ^= hash; // Update seed for next iteration
-        short pos = hash % SIGNATURE_LEN;
-        if (signatures[output_offset + pos] == 0) 
-	    {
-            signatures[output_offset + pos] = -1;
-            negative++;
+        int input_offset = idx + (-PARTITION_SIZE + (WORDLEN - 1) + (int)(PARTITION_SIZE / 2)) * (int)(idx / (PARTITION_SIZE - (WORDLEN - 1)));
+        int output_offset = idx * SIGNATURE_LEN;
+
+        uint32_t seed = static_cast<uint32_t>(input[input_offset]);
+        for (int i = 1; i < WORDLEN; i++)
+        {
+                seed = (seed << 8) | static_cast<uint32_t>(input[input_offset + i]);
         }
-    }
+
+        int non_zero = SIGNATURE_LEN * DENSITY / 100;
+        int positive = 0;
+        while (positive < non_zero / 2)
+        {
+                uint32_t hash = pcg_random(seed);
+                seed ^= hash;
+                short pos = hash % SIGNATURE_LEN;
+                if (signatures[output_offset + pos] == 0)
+                {
+                        signatures[output_offset + pos] = 1;
+                        positive++;
+                }
+        }
+
+        int negative = 0;
+        while (negative < non_zero / 2)
+        {
+                uint32_t hash = pcg_random(seed);
+                seed ^= hash;
+                short pos = hash % SIGNATURE_LEN;
+                if (signatures[output_offset + pos] == 0)
+                {
+                        signatures[output_offset + pos] = -1;
+                        negative++;
+                }
+        }
 }
 
-__global__ void reducingKernel(signed char* signatures, uint8_t* finalOutput, int numThreads, int remainingSignatures) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numThreads) {
-        return;
-    }
-    
-    // Calculate the starting position of the input signature
-    int partitionOffset = (int)(idx / 8) * (PARTITION_SIZE - WORDLEN + 1) * SIGNATURE_LEN;
-    int signatureOffset = (idx * 8) % SIGNATURE_LEN;
-    int signaturesToProcess = (idx == numThreads - 1 && remainingSignatures != 0) ? remainingSignatures : (PARTITION_SIZE - WORDLEN + 1);
-    
-    for (int i = 1; i < signaturesToProcess; i++) {
-        for (int j = 0; j < 8; j++) {
-            signatures[partitionOffset + signatureOffset + j] += signatures[partitionOffset + signatureOffset + j + i * SIGNATURE_LEN];
+__global__ void reducingKernel(signed char *signatures, uint8_t *finalOutput, int numThreads, int remainingSignatures)
+{
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= numThreads)
+        {
+                return;
         }
-    }
 
-    uint8_t c = 0;
+        int partitionOffset = (int)(idx / 8) * (PARTITION_SIZE - WORDLEN + 1) * SIGNATURE_LEN;
+        int signatureOffset = (idx * 8) % SIGNATURE_LEN;
+        int signaturesToProcess = (idx == numThreads - 1 && remainingSignatures != 0) ? remainingSignatures : (PARTITION_SIZE - WORDLEN + 1);
 
-    for (int i = 0; i < 8; i++) {
-        c |= (signatures[(partitionOffset + signatureOffset + i)] > 0) << (7-i);
-    }
+        for (int i = 1; i < signaturesToProcess; i++)
+        {
+                for (int j = 0; j < 8; j++)
+                {
+                        signatures[partitionOffset + signatureOffset + j] += signatures[partitionOffset + signatureOffset + j + i * SIGNATURE_LEN];
+                }
+        }
 
-    finalOutput[idx] = c;
+        uint8_t c = 0;
+
+        for (int i = 0; i < 8; i++)
+        {
+                c |= (signatures[(partitionOffset + signatureOffset + i)] > 0) << (7 - i);
+        }
+
+        finalOutput[idx] = c;
 }
 
-void launchKernels(const char* line_data, const int lineLength, uint8_t* output_signatures) {
-    int numThreads_signingKernel = SIGNING_KERNEL_THREADS(lineLength);
-    int numThreads_reducingKernel = REDUCING_KERNEL_THREADS(lineLength);
-    int remainingSignatures_lastReducingKernel = (SIGNING_KERNEL_THREADS(lineLength)) % (PARTITION_SIZE - WORDLEN + 1);
+struct PinnedFastaPointer {
+        const char* data;
+        int length;
+};
 
-    // Allocate memory on GPU
-    char* gpu_input;
-    signed char* gpu_signatures;
-    uint8_t* gpu_output;
+std::pair<std::vector<PinnedFastaPointer>, size_t> parseFastaPointers(const char *buffer, size_t size)
+{
+        std::vector<PinnedFastaPointer> pointers;
+        size_t maxLength = 0;
+        const char *ptr = buffer;
+        const char *end = buffer + size;
 
-    cudaMalloc((void**)&gpu_input, lineLength);
-    cudaMalloc((void**)&gpu_signatures, (numThreads_signingKernel) * SIGNATURE_LEN);
-    cudaMalloc((void**)&gpu_output, (numThreads_reducingKernel));
+        while (ptr < end)
+        {
+                do ptr++; while (ptr < end && *ptr != '\n' && *ptr != '\r');
 
-    // Copy input data from CPU to GPU
-    cudaMemcpy(gpu_input, line_data, lineLength, cudaMemcpyHostToDevice);
-    cudaMemset(gpu_signatures, 0, (numThreads_signingKernel) * SIGNATURE_LEN);
-    cudaMemset(gpu_output, 0, (numThreads_reducingKernel));
+                if (ptr >= end) break;
 
-    // Launch kernels
-    dim3 blockSize(256);
-    dim3 gridSize_signingKernel(numThreads_signingKernel);
-    dim3 gridSize_reducingKernel(numThreads_reducingKernel);
+                while(ptr < end && (*ptr == '\n' || *ptr == '\r')) ptr++;
 
-#ifdef DEBUG
-    printf("Launching signingKernel with %d threads\n", numThreads_signingKernel);
-#endif
+                if (ptr >= end) break;
 
-    signingKernel<<<gridSize_signingKernel, blockSize>>>(gpu_input, gpu_signatures, numThreads_signingKernel);
+                const char *seq_start = ptr;
+                int len = 0;
 
-#ifdef DEBUG
-    cudaDeviceSynchronize();
+                do {
+                        ptr++;
+                        len++;
+                } while (ptr < end && *ptr != '\n' && *ptr != '\r');
 
-    signed char* debug_signatures = (signed char*)malloc(numThreads_signingKernel * SIGNATURE_LEN * sizeof(signed char));
-    cudaMemcpy(debug_signatures, gpu_signatures, (numThreads_signingKernel) * SIGNATURE_LEN, cudaMemcpyDeviceToHost);
-    
-    int pos = 0;
-    int neg = 0;
-    int part = 0;
-    for (int i = 0; i < numThreads_signingKernel * SIGNATURE_LEN; i++) {
-        if (debug_signatures[i] > 0) {
-            printf("+ ");
-            pos++;
-        } else if (debug_signatures[i] < 0) {
-            printf("- ");
-            neg++;
-        } else {
-            printf("0 ");
+                while(ptr < end && (*ptr == '\n' || *ptr == '\r')) ptr++;
+
+                if (len > 0)
+                {
+                        PinnedFastaPointer p;
+                        p.data = seq_start;
+                        p.length = len;
+                        if (len > maxLength) maxLength = len;
+                        pointers.push_back(p);
+                }
         }
-        if ((i + 1) % SIGNATURE_LEN == 0) {
-            printf("pos: %d, neg: %d, sig: %d\n", pos, neg, debug_counter++);
-            pos = 0;
-            neg = 0;
-        }
-        if ((i + 1) % (SIGNATURE_LEN * (PARTITION_SIZE - WORDLEN + 1)) == 0) {
-            printf("End of partition %d\n\n", part++);
-        }
-    }
-    printf("\n");
-    free(debug_signatures);
 
-    printf("Launching reducingKernel with %d threads and %d remaining signatures\n\n", numThreads_reducingKernel, remainingSignatures_lastReducingKernel);
-#endif
-
-    reducingKernel<<<gridSize_reducingKernel, blockSize>>>(gpu_signatures, gpu_output, numThreads_reducingKernel, remainingSignatures_lastReducingKernel);
-
-    cudaMemcpy(output_signatures, gpu_output, (numThreads_reducingKernel), cudaMemcpyDeviceToHost);
-    
-    // Check for kernel launch errors
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-        return;
-    }
-
-    // Wait for all kernels to finish execution
-    cudaDeviceSynchronize();
-
-    // Clean up GPU memory
-    cudaFree(gpu_input);
-    cudaFree(gpu_signatures);
-    cudaFree(gpu_output);
+        return {pointers, maxLength};
 }
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
-        return 1;
-    }
+int main(int argc, char **argv)
+{
+        if (argc < 2)
+        {
+                fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
+                return 1;
+        }
 
-    const char* filename = argv[1];
+        const char *filename = argv[1];
 
-    auto start = std::chrono::high_resolution_clock::now();
+        char out_filename[256];
+        snprintf(out_filename, sizeof(out_filename), "%s.part%d_sigs%02d_%d_cuda", filename, PARTITION_SIZE, WORDLEN, SIGNATURE_LEN);
 
-    char out_filename[256];
-    snprintf(out_filename, sizeof(out_filename), "%s.part%d_sigs%02d_%d_cuda", filename, PARTITION_SIZE, WORDLEN, SIGNATURE_LEN);
-
-    FILE* file = fopen64(filename, "r");
-    FILE* sig_file = fopen64(out_filename, "w");
-
-    if (file == NULL)
-    {
-        fprintf(stderr, "Error: failed to open file %s\n", filename);
-        return 1;
-    }
-
-    char line_data[10000];
-    int line_length = 0;
-    int total_size = 0;
-    while (!feof(file))
-    {
-        fgets(line_data, 10000, file); // skip meta data line
-        fgets(line_data, 10000, file);
-        line_length = (int)strlen(line_data) - 1;
+        FILE *file = fopen64(filename, "rb");
+        if (!file)
+        {
+                fprintf(stderr, "Error: failed to open file %s\n", filename);
+                return 1;
+        }
         
-        line_data[line_length] = 0; // terminate string
+        fseek(file, 0, SEEK_END);
+        size_t file_size = ftell(file);
+        fseek(file, 0, SEEK_SET);
 
-        size_t numUint8_ts = REDUCING_KERNEL_THREADS(line_length);
-        total_size += numUint8_ts;
-        uint8_t* output_signatures = (uint8_t*)malloc(numUint8_ts * sizeof(uint8_t));
-        if (output_signatures == NULL) {
-            fprintf(stderr, "Memory allocation failed\n");
-            return 1;
+        cudaError_t err = cudaSetDevice(0);
+        if (err != cudaSuccess)
+        {
+                fprintf(stderr, "Error: failed to set CUDA device: %s\n", cudaGetErrorString(err));
+                fclose(file);
+                return 1;
+        }
+        
+        char *hostPinnedBuffer = nullptr;
+        err = cudaMallocHost((void **)&hostPinnedBuffer, file_size);
+        if (err != cudaSuccess)
+        {
+                fprintf(stderr, "Error: failed to allocate pinned memory: %s\n", cudaGetErrorString(err));
+                return 1;
+        }
+        
+        size_t read_size = fread(hostPinnedBuffer, 1, file_size, file);
+        fclose(file);
+        if (read_size != file_size)
+        {
+                fprintf(stderr, "Error: failed to read file %s\n", filename);
+                cudaFreeHost(hostPinnedBuffer);
+                return 1;
         }
 
-        memset(output_signatures, 0, numUint8_ts);
+        auto [fastaPointers, maxFastaLength] = parseFastaPointers(hostPinnedBuffer, file_size);
 
-        #ifdef DEBUG
-        printf("Processing line of length %d\n", line_length);
-        #endif
-
-        launchKernels(line_data, line_length, output_signatures);
-        //fwrite(output_signatures, sizeof(unsigned char), (REDUCING_KERNEL_THREADS(line_length) * (SIGNATURE_LEN / 8)), sig_file);
-        for (int i = 0; i < numUint8_ts; i++) {
-            fprintf(sig_file, "%02x", output_signatures[i]);
-            if ((i + 1) % 8 == 0) {
-                fprintf(sig_file, "\n");
-            }
+        size_t totalSequences = fastaPointers.size();
+        if (totalSequences == 0)
+        {
+                fprintf(stderr, "Error: no sequences found in file %s\n", filename);
+                cudaFreeHost(hostPinnedBuffer);
+                return 1;
         }
-        fprintf(sig_file, "\n");
 
-        free(output_signatures);
-    }
-    fclose(file);
-    fclose(sig_file);
+        FILE *sig_file = fopen64(out_filename, "wb");
+        if (!sig_file)
+        {
+                fprintf(stderr, "Error: failed to open output file %s\n", out_filename);
+                cudaFreeHost(hostPinnedBuffer);
+                return 1;
+        }
 
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duration = end - start;
+        std::vector<cudaStream_t> cudaStreams(BATCH_SIZE);
+        for (cudaStream_t &stream : cudaStreams)
+        {
+                err = cudaStreamCreate(&stream);
+                if (err != cudaSuccess)
+                {
+                        fprintf(stderr, "Error: failed to create CUDA stream: %s\n", cudaGetErrorString(err));
+                        fclose(sig_file);
+                        cudaFreeHost(hostPinnedBuffer);
+                        return 1;
+                }
+        }
 
-#ifdef DEBUG
-    printf("Total signatures size: %d uint8_ts\n", total_size);
-#endif
-    printf("%s %f seconds\n", filename, duration.count());
+        size_t worstCaseSigningBytes = (SIGNING_KERNEL_THREADS((int)maxFastaLength)) * BATCH_SIZE * SIGNATURE_LEN;
+        size_t worstCaseReducingBytes = (REDUCING_KERNEL_THREADS((int)maxFastaLength)) * BATCH_SIZE;
 
-    return 0;
+        unsigned int totalFileSize = 0;
+        for (const auto &p : fastaPointers)
+        {
+                totalFileSize += (REDUCING_KERNEL_THREADS(p.length));
+        }
+
+        uint8_t* resultSignatures = (uint8_t*)malloc(totalFileSize);
+        if (resultSignatures == nullptr)
+        {
+                fprintf(stderr, "Error: failed to allocate memory for resultSignatures\n");
+                fclose(sig_file);
+                cudaFreeHost(hostPinnedBuffer);
+                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                return 1;
+        }
+        size_t resultOffset = 0;
+        
+        signed char *signatures;
+        err = cudaMalloc((void **)&signatures, worstCaseSigningBytes * sizeof(signed char));
+        if (err != cudaSuccess)
+        {
+                fprintf(stderr, "Error: failed to allocate device memory for signatures: %s\n", cudaGetErrorString(err));
+                fclose(sig_file);
+                cudaFreeHost(hostPinnedBuffer);
+                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                return 1;
+        }
+        
+        uint8_t *gpuOutput;
+        err = cudaMalloc((void **)&gpuOutput, worstCaseReducingBytes * sizeof(uint8_t));
+        if (err != cudaSuccess)
+        {
+                fprintf(stderr, "Error: failed to allocate device memory for gpuOutput: %s\n", cudaGetErrorString(err));
+                fclose(sig_file);
+                cudaFreeHost(hostPinnedBuffer);
+                cudaFree(signatures);
+                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                return 1;
+        }
+
+        uint8_t *gpuOutput_copy = (uint8_t *)malloc(worstCaseReducingBytes);
+        
+        auto start = std::chrono::high_resolution_clock::now();
+
+        size_t currentIndex = 0;
+        while (currentIndex < totalSequences)
+        {
+                int actualBatchSize = (int)std::min((size_t)BATCH_SIZE, totalSequences - currentIndex);
+
+                int totalReducingBytes = 0;
+                
+                for (int i = 0; i < actualBatchSize; i++)
+                {
+                        totalReducingBytes += REDUCING_KERNEL_THREADS(fastaPointers[currentIndex + i].length);
+                }
+
+                size_t signatures_offset = 0;
+                size_t gpuOutput_offset = 0;
+                for (int i = 0; i < actualBatchSize; i++)
+                {
+                        const int numThreads_signingKernel = SIGNING_KERNEL_THREADS(fastaPointers[currentIndex + i].length);
+                        const int numThreads_reducingKernel = REDUCING_KERNEL_THREADS(fastaPointers[currentIndex + i].length);
+                        int remainingSignatures_lastReducingKernel = (SIGNING_KERNEL_THREADS(fastaPointers[currentIndex + i].length)) % (PARTITION_SIZE - WORDLEN + 1);
+
+                        if (signatures_offset + numThreads_signingKernel * SIGNATURE_LEN > worstCaseSigningBytes || gpuOutput_offset + numThreads_reducingKernel > worstCaseReducingBytes)
+                        {
+                                fprintf(stderr, "\nError: Exceeded preallocated GPU memory.\nAllocated %zu bytes for signatures and %zu bytes for gpuOutput\n", worstCaseSigningBytes, worstCaseReducingBytes);
+                                fclose(sig_file);
+                                cudaFreeHost(hostPinnedBuffer);
+                                cudaFree(signatures);
+                                cudaFree(gpuOutput);
+                                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                                return 1;
+                        }
+
+                        cudaMemsetAsync(reinterpret_cast<void*>(signatures + signatures_offset), 0, numThreads_signingKernel * SIGNATURE_LEN, cudaStreams[i]);
+                        err = cudaGetLastError();
+                        if (err != cudaSuccess)
+                        {
+                                fprintf(stderr, "\nError in main loop at %d in cudaMemsetAsync for signatures: %s\n", i, cudaGetErrorString(err));
+                                fclose(sig_file);
+                                cudaFreeHost(hostPinnedBuffer);
+                                cudaFree(signatures);
+                                cudaFree(gpuOutput);
+                                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                                return 1;
+                        }
+
+                        cudaMemsetAsync(reinterpret_cast<void*>(gpuOutput + gpuOutput_offset), 0, numThreads_reducingKernel, cudaStreams[i]);
+                        err = cudaGetLastError();
+                        if (err != cudaSuccess)
+                        {
+                                fprintf(stderr, "Error in main loop at %d in cudaMemsetAsync for gpuOutput: %s\n", i, cudaGetErrorString(err));
+                                fclose(sig_file);
+                                cudaFreeHost(hostPinnedBuffer);
+                                cudaFree(signatures);
+                                cudaFree(gpuOutput);
+                                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                                return 1;
+                        }
+
+                        dim3 blockSize(256);
+                        int blocksSigning = (numThreads_signingKernel + blockSize.x - 1) / blockSize.x;
+                        int blocksReducing = (numThreads_reducingKernel + blockSize.x - 1) / blockSize.x;
+
+                        dim3 gridSize_signingKernel((numThreads_signingKernel + blockSize.x - 1) / blockSize.x);
+                        signingKernel<<<blocksSigning, blockSize, 0, cudaStreams[i]>>>(fastaPointers[currentIndex + i].data, signatures + signatures_offset, numThreads_signingKernel);
+                        err = cudaGetLastError();
+                        if (err != cudaSuccess)
+                        {
+                                fprintf(stderr, "Error in signingKernel: %s\n", cudaGetErrorString(err));
+                                fclose(sig_file);
+                                cudaFreeHost(hostPinnedBuffer);
+                                cudaFree(signatures);
+                                cudaFree(gpuOutput);
+                                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                                return 1;
+                        }
+
+                        reducingKernel<<<blocksReducing, blockSize, 0, cudaStreams[i]>>>(signatures + signatures_offset, gpuOutput + gpuOutput_offset, numThreads_reducingKernel, remainingSignatures_lastReducingKernel);
+                        err = cudaGetLastError();
+                        if (err != cudaSuccess)
+                        {
+                                fprintf(stderr, "Error in reducingKernel: %s\n", cudaGetErrorString(err));
+                                fclose(sig_file);
+                                cudaFreeHost(hostPinnedBuffer);
+                                cudaFree(signatures);
+                                cudaFree(gpuOutput);
+                                for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                                return 1;
+                        }
+
+                        signatures_offset += numThreads_signingKernel * SIGNATURE_LEN;
+                        gpuOutput_offset += numThreads_reducingKernel;
+                }
+
+                err = cudaDeviceSynchronize();
+                if (err != cudaSuccess)
+                {
+                        fprintf(stderr, "Error in cudaStreamSynchronize: %s\n", cudaGetErrorString(err));
+                        fclose(sig_file);
+                        cudaFreeHost(hostPinnedBuffer);
+                        cudaFree(signatures);
+                        cudaFree(gpuOutput);
+                        for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                        return 1;
+                }
+
+                err = cudaMemcpy(resultSignatures + resultOffset, gpuOutput, totalReducingBytes, cudaMemcpyDeviceToHost);
+                if (err != cudaSuccess)
+                {
+                        fprintf(stderr, "Error in cudaMemcpy: %s\n", cudaGetErrorString(err));
+                        fclose(sig_file);
+                        cudaFreeHost(hostPinnedBuffer);
+                        cudaFree(signatures);
+                        cudaFree(gpuOutput);
+                        for (cudaStream_t &stream : cudaStreams) cudaStreamDestroy(stream);
+                        return 1;
+                }
+                
+                resultOffset += totalReducingBytes;
+                
+                currentIndex += actualBatchSize;
+        }
+        
+        cudaFree(signatures);
+        cudaFree(gpuOutput);
+
+        for (cudaStream_t &stream : cudaStreams)
+        {
+                cudaStreamDestroy(stream);
+        }
+        
+        cudaFreeHost(hostPinnedBuffer);
+
+        size_t written = fwrite(resultSignatures, 1, resultOffset, sig_file);
+        if (written != resultOffset)
+        {
+                fprintf(stderr, "Error: failed to write signatures to file %s\n", out_filename);
+        }
+        
+        free(resultSignatures);
+        
+        fclose(sig_file);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duration = end - start;
+
+        printf("%s %f seconds\n", filename, duration.count());
+
+        return 0;
 }

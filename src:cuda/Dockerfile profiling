@@ -1,0 +1,14 @@
+FROM nvcr.io/nvidia/cuda:13.0.1-devel-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . ./src/
+RUN nvcc -g -O3 -lineinfo -std=c++17 -o kmer-signatures src/*.cu
+
+RUN echo "ncu --csv --target-processes all ./kmer-signatures ./data/qut_xs.fasta > ./data/ncu_output.csv" > run.sh
+RUN chmod +x run.sh
+
+CMD ["./run.sh"]

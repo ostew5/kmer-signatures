@@ -3,6 +3,8 @@
 #include <string.h>
 #include <math.h>
 #include "uthash.h"
+#include <vector>
+
 extern "C" {
     void seed_random(char* term, int length);
     short random_num(short max);
@@ -151,13 +153,11 @@ void compute_signature(char* sequence, int length)
     // flatten and output to sig file
     for (int i = 0; i < SIGNATURE_LEN; i += 8) 
     {
-        byte c = 0;
+        uint8_t c = 0;
         for (int j = 0; j < 8; j++) 
             c |= (doc_sig[i + j] > 0) << (7-j);
-        //fwrite(&c, sizeof(byte), 1, sig_file);
-        fprintf(sig_file, "%02x", c);
+        fwrite(&c, sizeof(uint8_t), 1, sig_file);
     }
-    fprintf(sig_file, "\n");
 }
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
@@ -175,7 +175,6 @@ void partition(char* sequence, int length)
         i += PARTITION_SIZE/2;
     }
     while (i+PARTITION_SIZE/2 < length);
-    fprintf(sig_file, "\n");
     doc++;
 }
 
@@ -185,6 +184,51 @@ int power(int n, int e)
     for (int j=0; j<e; j++)
         p *= n;
     return p;
+}
+
+struct PinnedFastaPointer {
+        const char* data;
+        int length;
+};
+
+std::pair<std::vector<PinnedFastaPointer>, size_t> parseFastaPointers(const char *buffer, size_t size)
+{
+        std::vector<PinnedFastaPointer> pointers;
+        size_t maxLength = 0;
+        const char *ptr = buffer;
+        const char *end = buffer + size;
+
+        while (ptr < end)
+        {
+                do ptr++; while (ptr < end && *ptr != '\n' && *ptr != '\r');
+
+                if (ptr >= end) break;
+
+                while(ptr < end && (*ptr == '\n' || *ptr == '\r')) ptr++;
+
+                if (ptr >= end) break;
+
+                const char *seq_start = ptr;
+                int len = 0;
+
+                do {
+                        ptr++;
+                        len++;
+                } while (ptr < end && *ptr != '\n' && *ptr != '\r');
+
+                while(ptr < end && (*ptr == '\n' || *ptr == '\r')) ptr++;
+
+                if (len > 0)
+                {
+                        PinnedFastaPointer p;
+                        p.data = seq_start;
+                        p.length = len;
+                        if (len > maxLength) maxLength = len;
+                        pointers.push_back(p);
+                }
+        }
+
+        return {pointers, maxLength};
 }
 
 int main(int argc, char* argv[])
@@ -201,41 +245,45 @@ int main(int argc, char* argv[])
 
     for (int i=0; i<strlen(alphabet); i++)
         inverse[alphabet[i]] = i;
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    FILE* file = fopen64(filename, "r");
-
+        
+    FILE* file = fopen64(filename, "rb");
     if (file == NULL)
     {
         fprintf(stderr, "Error: failed to open file %s\n", filename);
         return 1;
     }
 
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char* buffer = (char*)malloc(file_size);
+    
+    size_t read_size = fread(buffer, 1, file_size, file);
+    fclose(file);
+    if (read_size != file_size)
+    {
+            fprintf(stderr, "Error: failed to read file %s\n", filename);
+            free(buffer);
+            return 1;
+    }
+
+    auto [fastaPointers, _] = parseFastaPointers(buffer, file_size);
+    
     char outfile[256];
     sprintf(outfile, "%s.part%d_sigs%02d_%d", filename, PARTITION_SIZE, WORDLEN, SIGNATURE_LEN);
-    sig_file = fopen64(outfile, "w");
+    sig_file = fopen64(outfile, "wb");
+    
+    auto start = std::chrono::high_resolution_clock::now();
 
-    char buffer[10000];
-    while (!feof(file))
-    {
-        fgets(buffer, 10000, file); // skip meta data line
-        fgets(buffer, 10000, file);
-        int n = (int)strlen(buffer) - 1;
-        buffer[n] = 0;
-#ifdef DEBUG
-        printf("Processing line of length %d\n", n);
-#endif
-        partition(buffer, n);
-#ifdef DEBUG
-        printf("\n");
-#endif
+    for (const auto& p : fastaPointers) {
+        partition(const_cast<char*>(p.data), p.length);
     }
-    fclose(file);
-
-    fclose(sig_file);
 
     auto end = std::chrono::high_resolution_clock::now();
+    
+    fclose(sig_file);
+
     std::chrono::duration<double> duration = end - start;
 
     printf("%s %f seconds\n", filename, duration.count());
