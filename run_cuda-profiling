@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-docker build -t signature:cuda -f "src:cuda/Dockerfile profiling" src:cuda/.
+docker build -t signature:cuda -f "src_cuda/Dockerfile profiling" src_cuda/.
 
 if [ $? -eq 0 ]; then
     echo "Docker build succeeded"
