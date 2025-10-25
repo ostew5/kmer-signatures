@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+docker build -t signature:cuda -f "src:cuda/Dockerfile profiling" src:cuda/.
+
+if [ $? -eq 0 ]; then
+    echo "Docker build succeeded"
+    docker run --cap-add=SYS_ADMIN --rm --gpus all -v "$(pwd)/data:/app/data" signature:cuda
+else
+    echo "Docker build failed"
+    exit 1
+fi
