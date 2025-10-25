@@ -20,7 +20,7 @@ git clone https://github.com/ostew5/kmer-signatures.git
 
 ```bash
 cd kmer-signatures
-sh run:cpu
+sh run_cpu
 ```
 
 ### Get started with the GPU-implementation
@@ -49,7 +49,7 @@ git clone https://github.com/ostew5/kmer-signatures.git
 
 ```bash
 cd kmer-signatures
-sh run:cuda
+sh run_cuda
 ```
 
 #### Step 5: Optionally run the profiling script
@@ -57,5 +57,5 @@ sh run:cuda
 This uses NVIDIA Nsight Compute, which needs a GPU with Compute Capability 5.0 or newer
 
 ```bash
-sh run:cuda_profiling
+sh run_cuda-profiling
 ```
